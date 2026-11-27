@@ -30,6 +30,9 @@ export interface Report {
   isDemo: boolean;
   photoUrl?: string | null;
   reporterName?: string;
+  /** Phase B server-side counts (optional — demo data only carries confirmCount). */
+  resolvedVotes?: number;
+  flagCount?: number;
 }
 
 /** Category colours — the single source of truth for markers, chips and badges. */

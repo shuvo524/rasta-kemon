@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useLang, t } from "@/lib/i18n";
 import { demoReports, type Report } from "@/data/demo-reports";
-import { loadAllReports } from "@/lib/store";
+import { fetchReports } from "@/lib/api";
 import ReportCard from "@/components/ReportCard";
 
 export default function ReportsPage() {
@@ -11,7 +11,17 @@ export default function ReportsPage() {
   const [reports, setReports] = useState<Report[]>(demoReports);
 
   useEffect(() => {
-    setReports(loadAllReports());
+    let cancelled = false;
+    fetchReports({ limit: 100 })
+      .then((d) => {
+        if (!cancelled) setReports(d.reports.length > 0 ? d.reports : demoReports);
+      })
+      .catch(() => {
+        if (!cancelled) setReports(demoReports);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (

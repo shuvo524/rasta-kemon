@@ -5,15 +5,18 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useLang, t } from "@/lib/i18n";
-import { nearbyReports, type Report } from "@/data/demo-reports";
 import {
-  findReportById,
-  formatDate,
-  formatNumber,
-  hasConfirmed,
-  loadAllReports,
-  markConfirmed,
-} from "@/lib/store";
+  demoReports,
+  nearbyReports,
+  type Report,
+} from "@/data/demo-reports";
+import { formatDate, formatNumber } from "@/lib/store";
+import {
+  fetchReportDetail,
+  confirmReport,
+  type ReportDetail,
+} from "@/lib/api";
+import { useSession } from "@/lib/auth-client";
 import { CategoryBadge, StatusBadge, DemoBadge } from "@/components/Badges";
 import ReportCard from "@/components/ReportCard";
 
@@ -36,21 +39,68 @@ export default function ReportDetailPage() {
   const { lang } = useLang();
   const params = useParams();
   const id = String(params.id);
+  const { data: session } = useSession();
   const [report, setReport] = useState<Report | undefined>(undefined);
+  const [detail, setDetail] = useState<ReportDetail | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
-  const [extraConfirms, setExtraConfirms] = useState(0);
+  const [myActions, setMyActions] = useState<string[]>([]);
+  const [actionError, setActionError] = useState("");
+  const [acting, setActing] = useState(false);
 
   useEffect(() => {
-    setReport(findReportById(id));
-    setConfirmed(hasConfirmed(id));
-    setLoaded(true);
+    let cancelled = false;
+    fetchReportDetail(id)
+      .then((d) => {
+        if (cancelled) return;
+        setDetail(d);
+        setReport(d.report);
+        setMyActions(d.myActions);
+        setLoaded(true);
+      })
+      .catch(() => {
+        // API/DB unreachable → labelled demo fallback (read-only).
+        if (cancelled) return;
+        const demo = demoReports.find((r) => String(r.id) === id);
+        setReport(demo);
+        setDetail(null);
+        setMyActions([]);
+        setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
   const nearby = useMemo(() => {
     if (!report) return [];
-    return nearbyReports(loadAllReports(), report.lat, report.lng, report.id, 4);
-  }, [report]);
+    if (detail) return detail.nearby;
+    return nearbyReports(demoReports, report.lat, report.lng, report.id, 4);
+  }, [report, detail]);
+
+  const timeline = useMemo(() => {
+    if (detail) {
+      // Build the 3-step timeline from the server's status events.
+      const seen = new Set(detail.timeline.map((e) => e.status));
+      return TIMELINE.map((step) => ({
+        ...step,
+        done: seen.has(step.status),
+        current:
+          step.status === report?.status ||
+          (report?.status === "in_progress" && step.status === "verified"),
+      }));
+    }
+    const idx =
+      report?.status === "resolved"
+        ? 3
+        : report?.status === "verified" || report?.status === "in_progress"
+          ? 2
+          : 1;
+    return TIMELINE.map((step, i) => ({
+      ...step,
+      done: i < idx,
+      current: i === idx - 1,
+    }));
+  }, [detail, report]);
 
   if (!loaded) {
     return <p className="p-8 text-center text-slate2">{t(lang, "common.loading")}</p>;
@@ -73,18 +123,39 @@ export default function ReportDetailPage() {
     );
   }
 
-  const timelineIdx =
-    report.status === "resolved"
-      ? 3
-      : report.status === "verified" || report.status === "in_progress"
-        ? 2
-        : 1;
+  const confirmed = myActions.includes("confirm");
+  const resolvedVoted = myActions.includes("resolved");
+  const flagged = myActions.includes("flag");
 
-  const onConfirm = () => {
-    if (confirmed) return;
-    markConfirmed(id);
-    setConfirmed(true);
-    setExtraConfirms((n) => n + 1);
+  const doAction = async (kind: "confirm" | "resolved" | "flag") => {
+    if (!session) {
+      setActionError(
+        lang === "bn"
+          ? "নিশ্চিত করতে লগইন করতে হবে।"
+          : "Please sign in to do this."
+      );
+      return;
+    }
+    if (myActions.includes(kind) || acting || !detail) return;
+    setActing(true);
+    setActionError("");
+    try {
+      const res = await confirmReport(id, kind);
+      setReport(res.report);
+      setMyActions((a) => [...a, kind]);
+    } catch (err) {
+      setActionError(
+        (err as Error & { status?: number }).status === 409
+          ? lang === "bn"
+            ? "আপনি ইতিমধ্যে এটি করেছেন।"
+            : "You have already done this."
+          : lang === "bn"
+            ? "আবার চেষ্টা করুন।"
+            : "Please try again."
+      );
+    } finally {
+      setActing(false);
+    }
   };
 
   return (
@@ -134,69 +205,118 @@ export default function ReportDetailPage() {
             </p>
           )}
 
-          <div className="mt-6 flex flex-wrap items-center gap-3 rounded-2xl bg-forest-50 p-4 ring-1 ring-forest-900/10">
-            <span className="text-2xl font-extrabold text-forest-900">
-              {formatNumber(report.confirmCount + extraConfirms, lang)}
-            </span>
-            <span className="text-sm font-semibold text-forest-900">
-              {t(lang, "common.confirmed")}
-            </span>
-            <button
-              type="button"
-              onClick={onConfirm}
-              disabled={confirmed}
-              className={`ml-auto rounded-full px-5 py-2.5 text-sm font-bold transition ${
-                confirmed
-                  ? "cursor-default bg-emerald-100 text-emerald-800"
-                  : "bg-forest-900 text-white hover:bg-forest-800"
-              }`}
-            >
-              {confirmed
-                ? `✓ ${t(lang, "detail.confirm")}`
-                : t(lang, "detail.confirm")}
-            </button>
+          {/* Community actions — server-side, one of each kind per account */}
+          <div className="mt-6 rounded-2xl bg-forest-50 p-4 ring-1 ring-forest-900/10">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-2xl font-extrabold text-forest-900">
+                {formatNumber(report.confirmCount, lang)}
+              </span>
+              <span className="text-sm font-semibold text-forest-900">
+                {t(lang, "common.confirmed")}
+              </span>
+              <span className="text-xs text-slate2">
+                {(report.resolvedVotes ?? 0) > 0
+                  ? `· ${formatNumber(report.resolvedVotes ?? 0, lang)} ${lang === "bn" ? "জন বলেছেন মিটে গেছে" : "say resolved"}`
+                  : ""}
+                {(report.flagCount ?? 0) > 0
+                  ? ` · ${formatNumber(report.flagCount ?? 0, lang)} ${lang === "bn" ? "টি ভুল তথ্যের ফ্ল্যাগ" : "inaccuracy flags"}`
+                  : ""}
+              </span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => doAction("confirm")}
+                disabled={confirmed || acting || !detail}
+                className={`rounded-full px-5 py-2.5 text-sm font-bold transition ${
+                  confirmed
+                    ? "cursor-default bg-emerald-100 text-emerald-800"
+                    : "bg-forest-900 text-white hover:bg-forest-800"
+                } disabled:opacity-60`}
+              >
+                {confirmed ? `✓ ${t(lang, "detail.confirm")}` : t(lang, "detail.confirm")}
+              </button>
+              <button
+                type="button"
+                onClick={() => doAction("resolved")}
+                disabled={resolvedVoted || acting || !detail}
+                className={`rounded-full px-4 py-2.5 text-sm font-bold transition ${
+                  resolvedVoted
+                    ? "cursor-default bg-emerald-100 text-emerald-800"
+                    : "bg-white text-forest-900 ring-1 ring-forest-900/25 hover:bg-forest-50"
+                } disabled:opacity-60`}
+              >
+                {lang === "bn" ? "মিটে গেছে" : "Resolved"}
+              </button>
+              <button
+                type="button"
+                onClick={() => doAction("flag")}
+                disabled={flagged || acting || !detail}
+                className={`rounded-full px-4 py-2.5 text-sm font-bold transition ${
+                  flagged
+                    ? "cursor-default bg-red-100 text-red-800"
+                    : "bg-white text-red-700 ring-1 ring-red-200 hover:bg-red-50"
+                } disabled:opacity-60`}
+              >
+                {lang === "bn" ? "ভুল তথ্য" : "Wrong info"}
+              </button>
+            </div>
+            {!session ? (
+              <p className="mt-2 text-xs text-slate2">
+                {lang === "bn" ? (
+                  <>
+                    নিশ্চিত করতে <Link href="/login" className="font-bold text-forest-800 underline">লগইন করুন</Link>।
+                  </>
+                ) : (
+                  <>
+                    <Link href="/login" className="font-bold text-forest-800 underline">Sign in</Link> to confirm.
+                  </>
+                )}
+              </p>
+            ) : null}
+            {actionError ? (
+              <p className="mt-2 text-xs font-semibold text-red-700">{actionError}</p>
+            ) : null}
+            {!detail ? (
+              <p className="mt-2 text-xs text-slate2">{t(lang, "detail.confirmNote")}</p>
+            ) : null}
           </div>
-          <p className="mt-2 text-xs text-slate2">{t(lang, "detail.confirmNote")}</p>
 
           <h2 className="mt-8 text-lg font-bold text-ink">
             {t(lang, "detail.timeline")}
           </h2>
           <ol className="mt-4 space-y-0">
-            {TIMELINE.map((step, i) => {
-              const done = i < timelineIdx;
-              const current = i === timelineIdx - 1;
-              return (
-                <li key={step.status} className="relative flex gap-3 pb-5 last:pb-0">
-                  <span className="flex flex-col items-center">
-                    <span
-                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-extrabold text-white ${
-                        done ? "bg-forest-700" : "bg-navy-900/20"
-                      }`}
-                    >
-                      {done ? "✓" : i + 1}
-                    </span>
-                    {i < TIMELINE.length - 1 ? (
-                      <span
-                        className={`mt-1 w-0.5 flex-1 ${done ? "bg-forest-700" : "bg-navy-900/15"}`}
-                        aria-hidden="true"
-                      />
-                    ) : null}
+            {timeline.map((step, i) => (
+              <li key={step.status} className="relative flex gap-3 pb-5 last:pb-0">
+                <span className="flex flex-col items-center">
+                  <span
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-extrabold text-white ${
+                      step.done ? "bg-forest-700" : "bg-navy-900/20"
+                    }`}
+                  >
+                    {step.done ? "✓" : i + 1}
                   </span>
-                  <span className="pt-0.5">
+                  {i < TIMELINE.length - 1 ? (
                     <span
-                      className={`block text-sm font-bold ${done ? "text-ink" : "text-slate2"}`}
-                    >
-                      {lang === "bn" ? step.bn : step.en}
-                    </span>
-                    {current ? (
-                      <span className="mt-0.5 block text-xs font-semibold text-forest-800">
-                        {lang === "bn" ? "বর্তমান অবস্থা" : "Current status"}
-                      </span>
-                    ) : null}
+                      className={`mt-1 w-0.5 flex-1 ${step.done ? "bg-forest-700" : "bg-navy-900/15"}`}
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                </span>
+                <span className="pt-0.5">
+                  <span
+                    className={`block text-sm font-bold ${step.done ? "text-ink" : "text-slate2"}`}
+                  >
+                    {lang === "bn" ? step.bn : step.en}
                   </span>
-                </li>
-              );
-            })}
+                  {step.current ? (
+                    <span className="mt-0.5 block text-xs font-semibold text-forest-800">
+                      {lang === "bn" ? "বর্তমান অবস্থা" : "Current status"}
+                    </span>
+                  ) : null}
+                </span>
+              </li>
+            ))}
           </ol>
         </article>
 
@@ -209,6 +329,7 @@ export default function ReportDetailPage() {
               zoom={14}
               height="280px"
               scrollWheelZoom={false}
+              cluster={false}
             />
             <p className="mt-2 text-xs text-slate2">
               📍 {report.lat.toFixed(4)}, {report.lng.toFixed(4)}

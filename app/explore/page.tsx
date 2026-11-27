@@ -13,7 +13,8 @@ import {
   type Category,
   type Report,
 } from "@/data/demo-reports";
-import { loadAllReports, formatNumber } from "@/lib/store";
+import { formatNumber } from "@/lib/store";
+import { fetchReports } from "@/lib/api";
 import ReportCard from "@/components/ReportCard";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
@@ -41,11 +42,21 @@ function ExploreContent() {
   const [locating, setLocating] = useState(false);
 
   useEffect(() => {
-    setReports(loadAllReports());
+    let cancelled = false;
+    fetchReports({ limit: 100 })
+      .then((d) => {
+        if (!cancelled) setReports(d.reports.length > 0 ? d.reports : demoReports);
+      })
+      .catch(() => {
+        if (!cancelled) setReports(demoReports);
+      });
     const preset = searchParams.get("category");
     if (preset && (CATEGORY_KEYS as string[]).includes(preset)) {
       setCategory(preset as Category);
     }
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -11,9 +11,11 @@ import {
   CATEGORY_COLORS,
   type Report,
 } from "@/data/demo-reports";
-import { loadAllReports, formatNumber } from "@/lib/store";
+import { formatNumber } from "@/lib/store";
+import { fetchReports, fetchStats, type Stats } from "@/lib/api";
 import ReportCard from "@/components/ReportCard";
 import { DemoBadge } from "@/components/Badges";
+import { DHAKA_CENTER } from "@/lib/geo";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
   ssr: false,
@@ -36,13 +38,41 @@ const CATEGORY_GLYPHS: Record<string, string> = {
 export default function HomePage() {
   const { lang } = useLang();
   const [reports, setReports] = useState<Report[]>(demoReports);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [live, setLive] = useState(false);
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
 
   useEffect(() => {
-    setReports(loadAllReports());
+    let cancelled = false;
+    (async () => {
+      try {
+        const [list, s] = await Promise.all([
+          fetchReports({ limit: 100 }),
+          fetchStats(),
+        ]);
+        if (cancelled) return;
+        // Empty DB → show the labelled demo data, never fake live data.
+        setReports(list.reports.length > 0 ? list.reports : demoReports);
+        setStats(s);
+        setLive(list.reports.length > 0);
+      } catch {
+        // DB unreachable (e.g. env not set yet) → labelled demo fallback.
+        if (!cancelled) {
+          setReports(demoReports);
+          setStats(null);
+          setLive(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const stats = useMemo(() => computeStats(reports), [reports]);
+  const computed = useMemo(
+    () => stats ?? computeStats(reports),
+    [stats, reports]
+  );
   const recent = useMemo(() => reports.slice(0, 6), [reports]);
   const selected = useMemo(
     () => reports.find((r) => String(r.id) === String(selectedId)),
@@ -50,10 +80,10 @@ export default function HomePage() {
   );
 
   const statItems = [
-    { label: t(lang, "stats.total"), value: stats.total },
-    { label: t(lang, "stats.active"), value: stats.active },
-    { label: t(lang, "stats.confirmations"), value: stats.confirmations },
-    { label: t(lang, "stats.districts"), value: stats.districts },
+    { label: t(lang, "stats.total"), value: computed.total },
+    { label: t(lang, "stats.active"), value: computed.active },
+    { label: t(lang, "stats.confirmations"), value: computed.confirmations },
+    { label: t(lang, "stats.districts"), value: computed.districts },
   ];
 
   const steps = [
@@ -99,7 +129,7 @@ export default function HomePage() {
                 {t(lang, "hero.report")}
               </Link>
             </div>
-            {/* Stats strip — computed from data, never invented */}
+            {/* Stats strip — computed from the DB (or demo data when the DB is empty) */}
             <dl className="mt-9 grid grid-cols-2 gap-3 sm:grid-cols-4">
               {statItems.map((s) => (
                 <div
@@ -115,7 +145,9 @@ export default function HomePage() {
                 </div>
               ))}
             </dl>
-            <p className="mt-3 text-xs text-slate2">{t(lang, "stats.note")}</p>
+            {!live ? (
+              <p className="mt-3 text-xs text-slate2">{t(lang, "stats.note")}</p>
+            ) : null}
           </div>
 
           <div className="lg:col-span-7">
@@ -124,8 +156,8 @@ export default function HomePage() {
                 reports={reports}
                 selectedId={selectedId}
                 onSelect={(r) => setSelectedId(r.id)}
-                center={[23.685, 90.3563]}
-                zoom={7}
+                center={DHAKA_CENTER}
+                zoom={11}
                 height="480px"
               />
               <div className="pointer-events-none absolute left-3 top-3 flex items-center gap-2 rounded-full bg-white/95 px-3 py-1.5 text-xs font-bold text-ink shadow-card">

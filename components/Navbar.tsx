@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useLang, t, type Lang } from "@/lib/i18n";
+import { useSession, signOut } from "@/lib/auth-client";
 
 function BrandMark() {
   return (
@@ -72,7 +73,11 @@ export function LanguageSwitcher() {
 export default function Navbar() {
   const { lang } = useLang();
   const pathname = usePathname();
+  const router = useRouter();
   const [open, setOpen] = useState(false);
+  const { data: session } = useSession();
+  const role = (session?.user as { role?: string } | undefined)?.role;
+  const signedIn = Boolean(session?.user);
 
   const links = [
     { href: "/", key: "nav.home" },
@@ -81,6 +86,12 @@ export default function Navbar() {
     { href: "/#how-it-works", key: "nav.how" },
     { href: "/#about", key: "nav.about" },
   ];
+
+  const onLogout = async () => {
+    await signOut();
+    router.push("/");
+    router.refresh();
+  };
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href.split("#")[0]);
@@ -108,6 +119,38 @@ export default function Navbar() {
           <div className="hidden sm:block">
             <LanguageSwitcher />
           </div>
+          {signedIn ? (
+            <>
+              <Link
+                href="/dashboard"
+                className="hidden rounded-full bg-cream px-3.5 py-2.5 text-sm font-bold text-forest-900 ring-1 ring-forest-900/15 transition hover:bg-forest-50 md:inline-flex"
+              >
+                {t(lang, "nav.dashboard")}
+              </Link>
+              {role === "admin" ? (
+                <Link
+                  href="/admin"
+                  className="hidden rounded-full bg-navy-900 px-3.5 py-2.5 text-sm font-bold text-white transition hover:bg-navy-800 md:inline-flex"
+                >
+                  {t(lang, "nav.admin")}
+                </Link>
+              ) : null}
+              <button
+                type="button"
+                onClick={onLogout}
+                className="hidden rounded-full px-3 py-2.5 text-sm font-bold text-slate2 transition hover:text-ink sm:inline-flex"
+              >
+                {t(lang, "nav.logout")}
+              </button>
+            </>
+          ) : (
+            <Link
+              href="/login"
+              className="hidden rounded-full bg-cream px-4 py-2.5 text-sm font-bold text-forest-900 ring-1 ring-forest-900/15 transition hover:bg-forest-50 sm:inline-flex"
+            >
+              {t(lang, "nav.login")}
+            </Link>
+          )}
           <Link
             href="/report/new"
             className="hidden rounded-full bg-forest-900 px-4 py-2.5 text-sm font-bold text-white shadow-card transition hover:bg-forest-800 sm:inline-flex"
@@ -143,6 +186,44 @@ export default function Navbar() {
                 {t(lang, l.key)}
               </Link>
             ))}
+            {signedIn ? (
+              <>
+                <Link
+                  href="/dashboard"
+                  onClick={() => setOpen(false)}
+                  className="rounded-xl px-3 py-2.5 text-[15px] font-semibold text-ink hover:bg-cream"
+                >
+                  {t(lang, "nav.dashboard")}
+                </Link>
+                {role === "admin" ? (
+                  <Link
+                    href="/admin"
+                    onClick={() => setOpen(false)}
+                    className="rounded-xl px-3 py-2.5 text-[15px] font-semibold text-ink hover:bg-cream"
+                  >
+                    {t(lang, "nav.admin")}
+                  </Link>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    void onLogout();
+                  }}
+                  className="rounded-xl px-3 py-2.5 text-left text-[15px] font-semibold text-slate2 hover:bg-cream"
+                >
+                  {t(lang, "nav.logout")}
+                </button>
+              </>
+            ) : (
+              <Link
+                href="/login"
+                onClick={() => setOpen(false)}
+                className="rounded-xl px-3 py-2.5 text-[15px] font-semibold text-ink hover:bg-cream"
+              >
+                {t(lang, "nav.login")}
+              </Link>
+            )}
             <Link
               href="/report/new"
               onClick={() => setOpen(false)}

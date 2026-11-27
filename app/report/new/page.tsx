@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useLang, t, categoryLabel } from "@/lib/i18n";
 import {
   CATEGORY_KEYS,
-  findDuplicate,
+  demoReports,
   type Category,
   type Report,
 } from "@/data/demo-reports";
-import { loadAllReports, saveUserReport } from "@/lib/store";
+import { submitReport, uploadPhoto } from "@/lib/api";
+import { useSession } from "@/lib/auth-client";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
   ssr: false,
@@ -21,36 +23,10 @@ const MapView = dynamic(() => import("@/components/MapView"), {
   ),
 });
 
-/** Downscale a photo to max 900px wide so it fits in localStorage. */
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("read failed"));
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error("image failed"));
-      img.onload = () => {
-        const max = 900;
-        const scale = Math.min(1, max / img.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext("2d");
-        if (!ctx) {
-          resolve(String(reader.result));
-          return;
-        }
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", 0.8));
-      };
-      img.src = String(reader.result);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 export default function NewReportPage() {
   const { lang } = useLang();
+  const router = useRouter();
+  const { data: session, isPending: sessionPending } = useSession();
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<Category>("damage");
   const [description, setDescription] = useState("");
@@ -58,14 +34,14 @@ export default function NewReportPage() {
   const [district, setDistrict] = useState("");
   const [lat, setLat] = useState<number | null>(null);
   const [lng, setLng] = useState<number | null>(null);
-  const [photo, setPhoto] = useState<string | null>(null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [duplicate, setDuplicate] = useState<Report | null>(null);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [uploadNote, setUploadNote] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-
-  const allReports = useMemo(() => loadAllReports(), []);
 
   useEffect(() => {
     // Pre-fill a sensible default pin (Dhaka) once the map is visible.
@@ -77,16 +53,18 @@ export default function NewReportPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onPhotoChange = async (file: File | undefined) => {
+  const onPhotoChange = (file: File | undefined) => {
     if (!file) return;
+    setPhotoFile(file);
     try {
-      setPhoto(await fileToDataUrl(file));
+      const url = URL.createObjectURL(file);
+      setPhotoPreview(url);
     } catch {
-      setPhoto(null);
+      setPhotoPreview(null);
     }
   };
 
-  const doSubmit = (force: boolean) => {
+  const doSubmit = async (force: boolean) => {
     const errs: string[] = [];
     if (title.trim().length < 4) errs.push(t(lang, "report.errTitle"));
     if (area.trim().length < 2) errs.push(t(lang, "report.errArea"));
@@ -94,36 +72,106 @@ export default function NewReportPage() {
     setErrors(errs);
     if (errs.length > 0) return;
 
-    if (!force && lat !== null && lng !== null) {
-      const dup = findDuplicate(allReports, category, lat, lng);
-      if (dup) {
-        setDuplicate(dup);
-        return;
-      }
-    }
-
     setSubmitting(true);
-    const report: Report = {
-      id: `user-${Date.now()}`,
-      title: title.trim(),
-      category,
-      description: description.trim(),
-      area: area.trim(),
-      district: district.trim() || "ঢাকা",
-      lat: lat as number,
-      lng: lng as number,
-      status: "pending",
-      confirmCount: 0,
-      severity: 2,
-      createdAt: new Date().toISOString(),
-      isDemo: false,
-      photoUrl: photo,
-      reporterName: lang === "bn" ? "আপনি" : "You",
-    };
-    saveUserReport(report);
-    setSubmitting(false);
-    setSubmittedId(String(report.id));
+    setUploadNote("");
+    try {
+      // Upload the photo first when one is attached. If Cloudinary is not
+      // configured yet (503), submit without the photo instead of failing.
+      let photoUrl: string | null = null;
+      if (photoFile) {
+        try {
+          photoUrl = await uploadPhoto(photoFile);
+        } catch (err) {
+          if ((err as Error & { status?: number }).status === 503) {
+            setUploadNote(
+              lang === "bn"
+                ? "ছবি আপলোডের ব্যবস্থা এখনো চালু হয়নি — রিপোর্টটি ছবি ছাড়া জমা হচ্ছে।"
+                : "Photo upload is not set up yet — submitting the report without a photo."
+            );
+          } else {
+            throw err;
+          }
+        }
+      }
+      const res = await submitReport({
+        title: title.trim(),
+        category,
+        description: description.trim(),
+        area: area.trim(),
+        district: district.trim() || "ঢাকা",
+        lat: lat as number,
+        lng: lng as number,
+        severity: 2,
+        photoUrl,
+        force,
+      });
+      setSubmittedId(String(res.report.id));
+    } catch (err) {
+      const e = err as Error & { status?: number; duplicateOf?: string };
+      if (e.status === 409 && e.duplicateOf && !force) {
+        const dup =
+          demoReports.find((r) => String(r.id) === e.duplicateOf) ?? null;
+        setDuplicate(
+          dup ?? {
+            id: e.duplicateOf,
+            title: "",
+            category,
+            description: "",
+            area,
+            district: "",
+            lat: lat as number,
+            lng: lng as number,
+            status: "pending",
+            confirmCount: 0,
+            severity: 2,
+            createdAt: "",
+            isDemo: false,
+          }
+        );
+      } else if (e.status === 401) {
+        router.push("/login?next=/report/new");
+      } else {
+        setErrors([
+          lang === "bn"
+            ? "জমা দেওয়া যায়নি — আবার চেষ্টা করুন।"
+            : "Could not submit — please try again.",
+        ]);
+      }
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  if (!sessionPending && !session) {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-14 sm:px-6">
+        <div className="rounded-3xl bg-white p-8 text-center shadow-card ring-1 ring-navy-900/5">
+          <h1 className="text-2xl font-extrabold text-ink">
+            {t(lang, "report.title")}
+          </h1>
+          <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-slate2">
+            {lang === "bn"
+              ? "রিপোর্ট দিতে প্রথমে লগইন করুন — এতে আপনার রিপোর্ট আপনার অ্যাকাউন্টের সাথে যুক্ত থাকবে।"
+              : "Please sign in to submit a report — it will be linked to your account."}
+          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <Link
+              href="/login?next=/report/new"
+              className="rounded-full bg-forest-900 px-6 py-3 text-sm font-bold text-white"
+            >
+              {lang === "bn" ? "লগইন করুন" : "Sign in"} →
+            </Link>
+            <Link
+              href="/register?next=/report/new"
+              className="rounded-full bg-cream px-6 py-3 text-sm font-bold text-ink ring-1 ring-navy-900/10"
+            >
+              {lang === "bn" ? "অ্যাকাউন্ট খুলুন" : "Create an account"}
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (submittedId) {
     return (
@@ -138,6 +186,11 @@ export default function NewReportPage() {
           <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-slate2">
             {t(lang, "report.successText")}
           </p>
+          {uploadNote ? (
+            <p className="mx-auto mt-2 max-w-md rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800 ring-1 ring-amber-200">
+              {uploadNote}
+            </p>
+          ) : null}
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <Link
               href={`/reports/${submittedId}`}
@@ -170,7 +223,7 @@ export default function NewReportPage() {
         onSubmit={(e) => {
           e.preventDefault();
           setDuplicate(null);
-          doSubmit(false);
+          void doSubmit(false);
         }}
       >
         {errors.length > 0 ? (
@@ -192,11 +245,11 @@ export default function NewReportPage() {
               href={`/reports/${duplicate.id}`}
               className="mt-1 block text-sm font-semibold text-amber-800 underline"
             >
-              {duplicate.title} — {duplicate.area}
+              {duplicate.title || duplicate.id} — {duplicate.area}
             </Link>
             <button
               type="button"
-              onClick={() => doSubmit(true)}
+              onClick={() => void doSubmit(true)}
               className="mt-3 rounded-full bg-amber-600 px-4 py-2 text-[13px] font-bold text-white"
             >
               {lang === "bn" ? "তবুও জমা দিন" : "Submit anyway"}
@@ -284,7 +337,7 @@ export default function NewReportPage() {
             {t(lang, "report.fieldLocationHint")}
           </p>
           <MapView
-            reports={allReports}
+            reports={demoReports}
             center={[23.8103, 90.4125]}
             zoom={12}
             height="320px"
@@ -322,17 +375,20 @@ export default function NewReportPage() {
           >
             📷 {lang === "bn" ? "ছবি বেছে নিন / ক্যামেরা দিয়ে তুলুন" : "Choose a photo / take with camera"}
           </button>
-          {photo ? (
+          {photoPreview ? (
             <div className="relative mt-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={photo}
+                src={photoPreview}
                 alt="Evidence preview"
                 className="max-h-64 w-full rounded-2xl object-cover ring-1 ring-navy-900/10"
               />
               <button
                 type="button"
-                onClick={() => setPhoto(null)}
+                onClick={() => {
+                  setPhotoFile(null);
+                  setPhotoPreview(null);
+                }}
                 className="absolute right-2 top-2 rounded-full bg-navy-950/80 px-3 py-1.5 text-xs font-bold text-white"
               >
                 ✕ {lang === "bn" ? "সরান" : "Remove"}
@@ -343,7 +399,7 @@ export default function NewReportPage() {
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={submitting || sessionPending}
           className="w-full rounded-full bg-forest-900 py-4 text-base font-bold text-white shadow-card transition hover:bg-forest-800 disabled:opacity-60"
         >
           {submitting ? t(lang, "report.submitting") : t(lang, "report.submit")}

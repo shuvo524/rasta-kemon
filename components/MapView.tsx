@@ -2,11 +2,13 @@
 
 import { useEffect, useMemo } from "react";
 import L from "leaflet";
-import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet";
+import "leaflet.markercluster";
+import { MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import { CATEGORY_COLORS, type Report } from "@/data/demo-reports";
+import { DHAKA_CENTER } from "@/lib/geo";
 
-export const DHAKA_CENTER: [number, number] = [23.8103, 90.4125];
-export const BANGLADESH_CENTER: [number, number] = [23.685, 90.3563];
+export { DHAKA_CENTER } from "@/lib/geo";
+export { BANGLADESH_CENTER } from "@/lib/geo";
 
 function pinIcon(color: string, label: string, selected: boolean) {
   const size = selected ? 38 : 30;
@@ -49,6 +51,61 @@ function ClickPicker({
   return null;
 }
 
+/**
+ * Imperative marker clustering (leaflet.markercluster) — the Dhaka pins
+ * no longer overlap at country zoom. Markers are rebuilt whenever the
+ * report list or the selection changes.
+ */
+function ClusterLayer({
+  reports,
+  selectedId,
+  onSelect,
+}: {
+  reports: Report[];
+  selectedId?: string | number | null;
+  onSelect?: (report: Report) => void;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    const group = L.markerClusterGroup({
+      showCoverageOnHover: false,
+      zoomToBoundsOnClick: true,
+      spiderfyOnMaxZoom: true,
+      maxClusterRadius: 55,
+      iconCreateFunction: (cluster) => {
+        const count = cluster.getChildCount();
+        const size = count < 5 ? 36 : count < 10 ? 42 : 48;
+        return L.divIcon({
+          className: "rk-cluster-wrap",
+          iconSize: [size, size],
+          iconAnchor: [size / 2, size / 2],
+          html: `<span class="rk-cluster" style="width:${size}px;height:${size}px;">${count}</span>`,
+        });
+      },
+    });
+    reports.forEach((r, i) => {
+      const marker = L.marker([r.lat, r.lng], {
+        icon: pinIcon(
+          CATEGORY_COLORS[r.category],
+          String(i + 1),
+          String(r.id) === String(selectedId)
+        ),
+      });
+      marker.on("click", () => onSelect?.(r));
+      group.addLayer(marker);
+    });
+    map.addLayer(group);
+    return () => {
+      map.removeLayer(group);
+    };
+    // Rebuild the cluster whenever data or selection changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, reports, selectedId]);
+
+  return null;
+}
+
 interface MapViewProps {
   reports: Report[];
   selectedId?: string | number | null;
@@ -60,18 +117,21 @@ interface MapViewProps {
   onPick?: (lat: number, lng: number) => void;
   pickMarker?: { lat: number; lng: number } | null;
   scrollWheelZoom?: boolean;
+  /** Turn clustering off (e.g. the single-report mini map). */
+  cluster?: boolean;
 }
 
 export default function MapView({
   reports,
   selectedId,
   onSelect,
-  center = BANGLADESH_CENTER,
-  zoom = 7,
+  center = DHAKA_CENTER,
+  zoom = 11,
   height = "420px",
   onPick,
   pickMarker,
   scrollWheelZoom = true,
+  cluster = true,
 }: MapViewProps) {
   const selected = useMemo(
     () => reports.find((r) => String(r.id) === String(selectedId)),
@@ -93,20 +153,23 @@ export default function MapView({
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-        {reports.map((r, i) => (
-          <Marker
-            key={String(r.id)}
-            position={[r.lat, r.lng]}
-            icon={pinIcon(
-              CATEGORY_COLORS[r.category],
-              String(i + 1),
-              String(r.id) === String(selectedId)
-            )}
-            eventHandlers={{
-              click: () => onSelect?.(r),
-            }}
+        {cluster ? (
+          <ClusterLayer
+            reports={reports}
+            selectedId={selectedId}
+            onSelect={onSelect}
           />
-        ))}
+        ) : (
+          reports.map((r, i) => (
+            <ClusterlessMarker
+              key={String(r.id)}
+              report={r}
+              label={String(i + 1)}
+              selected={String(r.id) === String(selectedId)}
+              onSelect={onSelect}
+            />
+          ))
+        )}
         {pickMarker ? (
           <Marker
             position={[pickMarker.lat, pickMarker.lng]}
@@ -119,5 +182,27 @@ export default function MapView({
         <ClickPicker onPick={onPick} />
       </MapContainer>
     </div>
+  );
+}
+
+import { Marker } from "react-leaflet";
+
+function ClusterlessMarker({
+  report,
+  label,
+  selected,
+  onSelect,
+}: {
+  report: Report;
+  label: string;
+  selected: boolean;
+  onSelect?: (report: Report) => void;
+}) {
+  return (
+    <Marker
+      position={[report.lat, report.lng]}
+      icon={pinIcon(CATEGORY_COLORS[report.category], label, selected)}
+      eventHandlers={{ click: () => onSelect?.(report) }}
+    />
   );
 }
