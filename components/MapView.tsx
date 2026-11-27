@@ -2,8 +2,17 @@
 
 import { useEffect, useMemo } from "react";
 import L from "leaflet";
-import "leaflet.markercluster";
-import { MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet";
+// leaflet.markercluster v2 is a pure ESM rewrite: it no longer patches the
+// global L object (the v1 `L.markerClusterGroup(...)` factory does not exist),
+// it exports the MarkerClusterGroup class directly — construct it with `new`.
+import { MarkerClusterGroup } from "leaflet.markercluster";
+import {
+  MapContainer,
+  Marker,
+  TileLayer,
+  useMap,
+  useMapEvents,
+} from "react-leaflet";
 import { CATEGORY_COLORS, type Report } from "@/data/demo-reports";
 import { DHAKA_CENTER } from "@/lib/geo";
 
@@ -68,7 +77,7 @@ function ClusterLayer({
   const map = useMap();
 
   useEffect(() => {
-    const group = L.markerClusterGroup({
+    const group = new MarkerClusterGroup({
       showCoverageOnHover: false,
       zoomToBoundsOnClick: true,
       spiderfyOnMaxZoom: true,
@@ -95,9 +104,14 @@ function ClusterLayer({
       marker.on("click", () => onSelect?.(r));
       group.addLayer(marker);
     });
-    map.addLayer(group);
+    // The v2 typings declare MarkerClusterGroup against Leaflet 2's
+    // 3-generic FeatureGroup, but @types/leaflet 1.9 only takes 1 generic,
+    // so TS sees the class as missing Layer members. At runtime the group
+    // really is a FeatureGroup (a Layer), so the cast only bridges the
+    // type gap — it changes nothing at runtime.
+    map.addLayer(group as unknown as L.Layer);
     return () => {
-      map.removeLayer(group);
+      map.removeLayer(group as unknown as L.Layer);
     };
     // Rebuild the cluster whenever data or selection changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -184,8 +198,6 @@ export default function MapView({
     </div>
   );
 }
-
-import { Marker } from "react-leaflet";
 
 function ClusterlessMarker({
   report,
