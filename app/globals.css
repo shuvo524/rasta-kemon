@@ -1,0 +1,28 @@
+@import "leaflet/dist/leaflet.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Leaflet pin container must not fight Tailwind's preflight. */
+.rk-pin {
+  background: transparent;
+  border: none;
+}
+
+.leaflet-container {
+  font-family: inherit;
+  background: #e8eef2;
+}
+
+/* Keep the map attribution subtle. */
+.leaflet-control-attribution {
+  font-size: 10px;
+}
